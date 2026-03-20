@@ -1,0 +1,67 @@
+================================================================================
+StreamerAssistant - Ports, WebSockets, and SAMMI Integration Documentation
+================================================================================
+
+This document outlines how the StreamerAssistant Python backend communicates 
+with its local companion HTML pages and external applications like SAMMI.
+
+--------------------------------------------------------------------------------
+1. LOCAL WEBSOCKET SERVER (Port 41837)
+--------------------------------------------------------------------------------
+The Python application (StreamerAssistant.exe) automatically hosts a local 
+WebSocket server to act as a real-time bridge between all your local tools.
+
+- Address: ws://localhost:41837 (or ws://0.0.0.0:41837)
+- Purpose: Used by the local HTML files (settings.html, obs_bridge.html, 
+  console.html, chat_overlay.html, key_tester.html) to communicate with the 
+  Python backend.
+- Features:
+  * Distributes live chat events across your overlays in real-time.
+  * Synchronizes OBS Studio resources for the obs_bridge dropdowns.
+  * Receives configuration changes (when you click "Save" in settings.html).
+  * Serves TTS (Text-to-Speech) queue updates.
+  * Handles test triggers fired from the Web UI.
+
+If you ever build custom HTML overlays, you can connect to this WebSocket 
+and listen for JSON payloads (like `{"type": "moderation"}` or `{"type": "alert"}`).
+
+--------------------------------------------------------------------------------
+2. SAMMI WEBHOOK INTEGRATION (Port 9450)
+--------------------------------------------------------------------------------
+While the local HTML relies on WebSockets, SAMMI integration works independently 
+by receiving HTTP POST requests sent directly from the Python backend.
+
+- Default SAMMI URL: http://localhost:9450/webhook
+  (This must match SAMMI's internal Webhook port, which defaults to 9450).
+- Password: Not required by default, but can be set in settings.html.
+- Purpose: StreamerAssistant acts as a universal parser. It reads Twitch TVs, 
+  Kick, and YouTube streams simultaneously, normalizes their data, and fires it 
+  to SAMMI as standardized webhook events.
+
+Whenever a user subscribes, chats, or triggers an alert, StreamerAssistant 
+packages the data and sends a POST request to SAMMI containing this structure:
+
+{
+    "trigger": "Twitch sub",
+    "msg_id": "uuid-string",
+    "platform": "Twitch",
+    "username": "User123",
+    "message": "User123 subscribed!",
+    "customData": { ... },
+    "vader_score": 0.8,
+    "ai_reason": "CLEAN"
+}
+
+Inside SAMMI, you set up a Webhook Trigger that listens for the exact `trigger` 
+string (e.g. "Twitch sub" or "Kick follow") to activate your SAMMI buttons.
+
+--------------------------------------------------------------------------------
+3. GLOBAL HOTKEYS
+--------------------------------------------------------------------------------
+The Python backend intercepts the exact same triggers right before they are 
+shipped to SAMMI. If a wildcard trigger (e.g., `Twitch * sub`) matches your 
+defined bindings in settings.html, it will use Python's OS-level access to 
+physically hold down keys (e.g., Shift + F4) for 100ms. 
+
+This allows you to trigger applications that do not support WebSockets or APIs 
+just by relying on the StreamerAssistant's uniform trigger system!

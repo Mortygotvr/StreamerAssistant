@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Streamer Assistant - OBS Trigger Bridge</title>
+    <style>
+        :root { --bg: #1e1e1e; --text: #f0f0f0; --accent: #007acc; --border: #333; --panel: #252526; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: var(--bg); color: var(--text); margin: 0; padding: 20px; }
+        .container { max-width: 900px; margin: 0 auto; }
+        h1, h2 { margin-top: 0; }
+        
+        .header-bar { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid var(--border); padding-bottom: 10px; margin-bottom: 20px; }
+        .status-container { display: flex; gap: 20px; }
+        .status { display: flex; align-items: center; gap: 8px; font-weight: bold; }
+        .dot { width: 12px; height: 12px; border-radius: 50%; background: #d32f2f; }
+        .dot.connected { background: #4caf50; }
+        
+        .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 20px; margin-bottom: 20px; }
+        .input-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-size: 0.9em; color: #ccc; }
+        input[type="text"], input[type="password"], input[type="number"], select { width: 100%; padding: 8px; background: #1a1a1a; border: 1px solid #444; color: white; border-radius: 4px; box-sizing: border-box; }
+        select { appearance: auto; cursor: pointer; }
+        button { background: var(--accent); color: white; border: none; padding: 8px 15px; cursor: pointer; border-radius: 4px; font-weight: bold; }
+        button:hover { opacity: 0.9; }
+        button.btn-red { background: #d32f2f; }
+        button.btn-green { background: #2e7d32; }
+
+        .trigger-card { background: #1a1a1a; padding: 15px; border-radius: 6px; margin-bottom: 15px; border: 1px solid #333; display: flex; flex-direction: column; gap: 10px; }
+        .trigger-row-top { display: grid; grid-template-columns: 2fr 1.5fr 1.5fr 1fr auto; gap: 10px; align-items: end; }
+        .trigger-row-bottom { display: grid; grid-template-columns: 1.5fr 1.5fr 3fr; gap: 10px; align-items: end; background: #222; padding: 10px; border-radius: 4px; border-left: 3px solid var(--accent); }
+        
+        #log-window { background: #111; border: 1px solid #333; height: 150px; overflow-y: auto; padding: 10px; font-family: monospace; font-size: 0.9em; border-radius: 4px; }
+        .log-entry { margin-bottom: 4px; border-bottom: 1px solid #222; padding-bottom: 4px; }
+        .log-time { color: #888; margin-right: 8px; }
+        
+        .tooltip-text { font-size: 0.85em; color: #888; margin-bottom: 10px; display: block; }
+    </style>
+    <!-- OBS WebSocket JS Library -->
+    <script src="https://cdn.jsdelivr.net/npm/obs-websocket-js@5.0.2/dist/obs-ws.min.js"></script>
+</head>
+<body>
+
+<div class="container">
+    <div class="header-bar">
+        <h1>OBS Trigger Bridge</h1>
+        <div class="status-container">
+            <div class="status"><div id="sa-dot" class="dot"></div> Assistant WS</div>
+            <div class="status"><div id="obs-dot" class="dot"></div> OBS WS</div>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h2>OBS Connection Settings</h2>
+        <span class="tooltip-text">Ensure OBS WebSocket Server is enabled in your OBS Settings under Tools -> WebSocket Server Settings.</span>
+        <div style="display: grid; grid-template-columns: 2fr 1fr auto; gap: 15px; align-items: end;">
+            <div class="input-group" style="margin:0;">
+                <label>WebSocket URL (default: ws://127.0.0.1:4455)</label>
+                <input type="text" id="obs-url" value="ws://127.0.0.1:4455">
+            </div>
+            <div class="input-group" style="margin:0;">
+                <label>Password</label>
+                <input type="password" id="obs-pass">
+            </div>
+            <button class="btn-green" id="btn-obs-connect" onclick="connectOBS()">Connect & Save</button>
+        </div>
+    </div>
+
+    <div class="panel">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+            <h2 style="margin:0;">Trigger Actions</h2>
+            <button onclick="addTriggerRow()">+ Add Action</button>
+        </div>
+        <span class="tooltip-text">
+            Use <code>*</code> as a wildcard in the trigger. Example: <code>Twitch * sub</code>. You can use multiple triggers separated by commas.<br>
+            <b>New:</b> You can update a Text Source dynamically! Use any attributes from the JSON payload like <code>{username}</code>, <code>{message}</code> (or <code>{1}</code>, <code>{2}</code> for text matched by the wildcards). To access custom data fields, you can use <code>{customData.key}</code>.
+        </span>
+        
+        <div id="triggers-container">
+            <!-- Trigger rows generated here -->
+        </div>
+        <div style="margin-top: 15px; text-align: right;">
+            <button class="btn-green" onclick="saveTriggers()">Save Actions</button>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h2>Action Log</h2>
+        <div id="log-window"></div>
+    </div>
+</div>
+
+<script>
+    // --- STATE & STORAGE ---
+    const STORAGE_KEY = "obs_bridge_config";
+    let SAWebSocket = null;
+    const obs = new OBSWebSocket();
+    let config = {
+        obs_url: "ws://127.0.0.1:4455",
+        obs_pass: "",
+        triggers: []
+    };
+
+    let obsScenes = [];
+    let obsSources = {}; // Now an object: sceneName -> [sources...]
+    let obsTextSources = [];
+
+    // --- LOGGING ---
+    function logMsg(msg, isError = false) {
+        const win = document.getElementById('log-window');
+        const d = new Date().toLocaleTimeString();
+        const div = document.createElement('div');
+        div.className = 'log-entry';
+        div.innerHTML = `<span class="log-time">[${d}]</span> <span style="color: ${isError ? '#ff5252' : '#fff'}">${msg}</span>`;
+        win.appendChild(div);
+        win.scrollTop = win.scrollHeight;
+    }
+
+    // --- INITIALIZATION ---
+    window.onload = () => {
+        const saved = localStorage.getItem(STORAGE_KEY);
+        if (saved) {
+            try {
+                config = JSON.parse(saved);
+                document.getElementById('obs-url').value = config.obs_url || "ws://127.0.0.1:4455";
+                document.getElementById('obs-pass').value = config.obs_pass || "";
+            } catch(e) {}
+        }
+        
+        renderTriggers();
+        connectSA();
+        
+        // Auto-connect OBS if saved
+        if (config.obs_url) {
+            connectOBS();
+        }
+    };
+
+    // --- OBS LOGIC ---
+    async function connectOBS() {
+        const url = document.getElementById('obs-url').value;
+        const pass = document.getElementById('obs-pass').value;
+        const btn = document.getElementById('btn-obs-connect');
+        
+        btn.innerText = "Connecting...";
+        
+        try {
+            await obs.connect(url, pass, { rpcVersion: 1 });
+            document.getElementById('obs-dot').classList.add('connected');
+            btn.innerText = "Connected";
+            logMsg("Successfully connected to OBS!");
+            
+            // Save to config
+            config.obs_url = url;
+            config.obs_pass = pass;
+            saveConfig();
+            
+            await fetchObsData();
+        } catch (error) {
+            document.getElementById('obs-dot').classList.remove('connected');
+            btn.innerText = "Connect OBS";
+            logMsg(`OBS Connection failed: ${error.message || error.error || error}`, true);
+        }
+    }
+
+    obs.on('ConnectionClosed', () => {
+        document.getElementById('obs-dot').classList.remove('connected');
+        document.getElementById('btn-obs-connect').innerText = "Connect OBS";
+        logMsg("OBS Disconnected.", true);
+        obsScenes = [];
+        obsSources = {};
+        obsTextSources = [];
+        renderTriggers();
+    });
+
+    async function fetchObsData() {
+        try {
+            // Get Scenes
+            const scenesResponse = await obs.call('GetSceneList');
+            obsScenes = scenesResponse.scenes.map(s => s.sceneName).reverse(); // reverse to put main scenes top
+
+            // Get Scene Items (Sources) per scene
+            obsSources = {};
+            let allTextSources = new Set();
+            
+            for (const s of obsScenes) {
+                const { sceneItems } = await obs.call('GetSceneItemList', { sceneName: s });
+                obsSources[s] = sceneItems.map(item => item.sourceName).sort();
+                
+                // Keep track of all text sources across all scenes for the global list
+                // We'll get the actual text inputs below
+            }
+            
+            // Get Text Sources
+            const inputsResponse = await obs.call('GetInputList');
+            obsTextSources = inputsResponse.inputs
+                .filter(i => i.inputKind.includes('text'))
+                .map(i => i.inputName).sort();
+            
+            logMsg(`Loaded ${obsScenes.length} scenes.`);
+            renderTriggers(); // Update UI to show dropdowns
+        } catch (e) {
+            logMsg("Error fetching OBS data: " + (e.error || e.message), true);
+        }
+    }
+
+    // Toggle logic: target scene -> target item -> set enabled(true) -> wait -> set enabled(false)
+    function fireObsAction(actionConfig, triggerString, matches, payload) {
+        return new Promise(async (resolve) => {
+            logMsg(`Matched Trigger: "${triggerString}". Processing...`);
+            
+            try {
+                // Optional: Update text source first
+                if (actionConfig.textSource && actionConfig.textContent) {
+                    let finalTxt = actionConfig.textContent;
+                    // Replace {1}, {2}, etc. with wildcards
+                    if (matches) {
+                        matches.forEach((m, idx) => {
+                            finalTxt = finalTxt.replace(new RegExp(`\\{${idx + 1}\\}`, 'g'), m);
+                        });
+                    }
+                    // Replace {key} with values from the JSON payload (e.g. {username}, {message})
+                    if (payload) {
+                        for (const key in payload) {
+                            if (payload.hasOwnProperty(key) && typeof payload[key] !== 'object') {
+                                finalTxt = finalTxt.replace(new RegExp(`\\{${key}\\}`, 'g'), payload[key]);
+                            }
+                        }
+                        
+                        // Support for nested properties like {customData.viewers}
+                        if (payload.customData) {
+                            for (const nestedKey in payload.customData) {
+                                if (payload.customData.hasOwnProperty(nestedKey)) {
+                                    finalTxt = finalTxt.replace(new RegExp(`\\{customData\\.${nestedKey}\\}`, 'g'), payload.customData[nestedKey]);
+                                    // Also allow accessing just the key as a fallback shortcut, e.g., {viewers}
+                                    finalTxt = finalTxt.replace(new RegExp(`\\{${nestedKey}\\}`, 'g'), payload.customData[nestedKey]);
+                                }
+                            }
+                        }
+                    }
+                    
+                    await obs.call('SetInputSettings', {
+                        inputName: actionConfig.textSource,
+                        inputSettings: { text: finalTxt }
+                    });
+                    logMsg(`[TEXT] Updated "${actionConfig.textSource}"`);
+                }
+                
+                // Optional: Enable text source if it is inside a specific scene
+                let textSceneItemId = null;
+                if (actionConfig.textScene && actionConfig.textSource) {
+                    try {
+                        const textRes = await obs.call('GetSceneItemId', {
+                            sceneName: actionConfig.textScene,
+                            sourceName: actionConfig.textSource
+                        });
+                        textSceneItemId = textRes.sceneItemId;
+                        await obs.call('SetSceneItemEnabled', {
+                            sceneName: actionConfig.textScene,
+                            sceneItemId: textSceneItemId,
+                            sceneItemEnabled: true
+                        });
+                    } catch (e) {
+                        logMsg(`Could not enable text source in scene: ` + (e.error || e), true);
+                    }
+                }
+
+                // 1. Get Scene Item ID (if a main source is defined)
+                let mainSceneItemId = null;
+                if (actionConfig.scene && actionConfig.source) {
+                    try {
+                        const { sceneItemId } = await obs.call('GetSceneItemId', {
+                            sceneName: actionConfig.scene,
+                            sourceName: actionConfig.source
+                        });
+                        mainSceneItemId = sceneItemId;
+                        
+                        // 2. Enable Item
+                        await obs.call('SetSceneItemEnabled', {
+                            sceneName: actionConfig.scene,
+                            sceneItemId: mainSceneItemId,
+                            sceneItemEnabled: true
+                        });
+                        logMsg(`[ACTIVATE] Enabled "${actionConfig.source}"`);
+                    } catch (e) {
+                        logMsg(`Could not enable main source: ` + (e.error || e), true);
+                    }
+                }
+                
+                // 3. Wait Duration
+                setTimeout(async () => {
+                     // Disable main scene item if it was enabled
+                     if (actionConfig.scene && mainSceneItemId !== null) {
+                         try {
+                             await obs.call('SetSceneItemEnabled', {
+                                 sceneName: actionConfig.scene,
+                                 sceneItemId: mainSceneItemId,
+                                 sceneItemEnabled: false
+                             });
+                             logMsg(`[DEACTIVATE] Disabled "${actionConfig.source}"`);
+                         } catch(err) {
+                             logMsg(`Failed to disable "${actionConfig.source}": ` + (err.error || err), true);
+                         }
+                     }
+                     
+                     // Disable text scene item if it was enabled
+                     if (actionConfig.textScene && textSceneItemId !== null) {
+                         try {
+                             await obs.call('SetSceneItemEnabled', {
+                                 sceneName: actionConfig.textScene,
+                                 sceneItemId: textSceneItemId,
+                                 sceneItemEnabled: false
+                             });
+                         } catch(err) {}
+                     }
+                     resolve();
+                }, actionConfig.duration || 5000);
+                
+            } catch (err) {
+                logMsg(`OBS Action Error: ` + (err.error || err), true);
+                resolve();
+            }
+        });
+    }
+
+    // --- STREAMER ASSISTANT LOGIC ---
+    function connectSA() {
+        SAWebSocket = new WebSocket('ws://localhost:41837');
+        
+        SAWebSocket.onopen = () => {
+            document.getElementById('sa-dot').classList.add('connected');
+            logMsg("Connected to StreamerAssistant.");
+        };
+        
+        SAWebSocket.onclose = () => {
+            document.getElementById('sa-dot').classList.remove('connected');
+            setTimeout(connectSA, 5000);
+        };
+        
+        SAWebSocket.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                // We rely on the unified 'moderation' payload because it contains the exact SAMMI trigger string
+                if (data.type === 'moderation') {
+                    const payload = data.payload;
+                    if (payload && payload.trigger) {
+                        checkTriggers(payload.trigger, payload);
+                    }
+                }
+            } catch(e) {}
+        };
+    }
+
+    function matchWildcard(pattern, target) {
+        // Escape regex chars except wildcard (*), replace * with (.*) to capture
+        const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+        const regexStr = "^" + escaped.replace(/\*/g, '(.*)') + "$";
+        const regex = new RegExp(regexStr, 'i'); // case insensitive
+        return target.match(regex); // Returns array of matches or null
+    }
+
+    const triggerQueues = {}; // index -> array of { triggerString, matches, payload }
+    const triggerExecuting = {}; // index -> boolean
+
+    function checkTriggers(incomingTrigger, payload) {
+        config.triggers.forEach((t, index) => {
+            // Must have a trigger string, and AT LEAST one action (either a main source OR a text source)
+            if (t.trigger && ((t.scene && t.source) || t.textSource)) {
+                // Support multiple comma-separated triggers
+                const triggerPatterns = t.trigger.split(',').map(s => s.trim()).filter(s => s);
+                let matched = false;
+                let wildcards = [];
+
+                for (let pattern of triggerPatterns) {
+                    const matchResult = matchWildcard(pattern, incomingTrigger);
+                    if (matchResult) {
+                        matched = true;
+                        wildcards = matchResult.slice(1);
+                        break;
+                    }
+                }
+
+                if (matched) {
+                    if (document.getElementById('obs-dot').classList.contains('connected')) {
+                        enqueueObsAction(index, t, incomingTrigger, wildcards, payload);
+                    } else {
+                        logMsg("Event detected but OBS is not connected.", true);
+                    }
+                }
+            }
+        });
+    }
+
+    function enqueueObsAction(index, actionConfig, triggerString, matches, payload) {
+        if (!triggerQueues[index]) {
+            triggerQueues[index] = [];
+        }
+        triggerQueues[index].push({ actionConfig, triggerString, matches, payload });
+        processQueue(index);
+    }
+
+    async function processQueue(index) {
+        if (triggerExecuting[index]) return;
+        if (!triggerQueues[index] || triggerQueues[index].length === 0) return;
+
+        triggerExecuting[index] = true;
+        const task = triggerQueues[index].shift();
+        
+        await fireObsAction(task.actionConfig, task.triggerString, task.matches, task.payload);
+        
+        triggerExecuting[index] = false;
+        processQueue(index); // Process next in queue
+    }
+
+    // --- UI LOGIC ---
+    function renderTriggers() {
+        const cont = document.getElementById('triggers-container');
+        cont.innerHTML = "";
+        
+        if (!config.triggers || config.triggers.length === 0) {
+            config.triggers = [{ trigger: "Twitch * sub", scene: "Main Scene", source: "Sub Alert", duration: 5000, textScene: "", textSource: "", textContent: "Thanks {1} for the sub!" }];
+        }
+        
+        config.triggers.forEach((t, i) => {
+            const div = document.createElement('div');
+            div.className = 'trigger-card';
+            
+            // Check if we use dropdown or text
+            const isConnected = document.getElementById('obs-dot').classList.contains('connected');
+            
+            let sceneHTML = `<input type="text" class="t-scene" value="${t.scene || ''}" placeholder="Main Scene">`;
+            let sourceHTML = `<input type="text" class="t-source" value="${t.source || ''}" placeholder="Sub Alert Media">`;
+            let textSceneHTML = `<input type="text" class="t-textscene" value="${t.textScene || ''}" placeholder="Text Scene (Optional)">`;
+            let textSourceHTML = `<input type="text" class="t-textsource" value="${t.textSource || ''}" placeholder="Sub Name Text GDI+">`;
+            
+            // Generate Selects if connected and data exists
+            if (isConnected && obsScenes.length > 0) {
+                let sOpt = `<option value="">-- Select Scene --</option>`;
+                obsScenes.forEach(s => { sOpt += `<option value="${s}" ${s === t.scene ? 'selected' : ''}>${s}</option>`; });
+                if (t.scene && !obsScenes.includes(t.scene)) { sOpt += `<option value="${t.scene}" selected>${t.scene} (Not Found)</option>`; }
+                sceneHTML = `<select class="t-scene" onchange="updateSourcesDropdown(this, ${i})">${sOpt}</select>`;
+                
+                let tsOpt = `<option value="">-- Select Scene --</option>`;
+                obsScenes.forEach(s => { tsOpt += `<option value="${s}" ${s === t.textScene ? 'selected' : ''}>${s}</option>`; });
+                if (t.textScene && !obsScenes.includes(t.textScene)) { tsOpt += `<option value="${t.textScene}" selected>${t.textScene} (Not Found)</option>`; }
+                textSceneHTML = `<select class="t-textscene">${tsOpt}</select>`;
+            }
+            if (isConnected) {
+                // Determine sources for the selected scene
+                let availableSources = [];
+                if (t.scene && obsSources[t.scene]) {
+                    availableSources = obsSources[t.scene];
+                } else if (obsScenes.length > 0) {
+                    // Fallback to all sources if no scene selected just to not break completely
+                    let allArr = new Set();
+                    Object.values(obsSources).forEach(arr => arr.forEach(src => allArr.add(src)));
+                    availableSources = Array.from(allArr).sort();
+                }
+
+                let mOpt = `<option value="">-- Select Source --</option>`;
+                availableSources.forEach(s => { mOpt += `<option value="${s}" ${s === t.source ? 'selected' : ''}>${s}</option>`; });
+                if (t.source && !availableSources.includes(t.source)) { mOpt += `<option value="${t.source}" selected>${t.source} (Not Found)</option>`; }
+                sourceHTML = `<select class="t-source" id="source-select-${i}">${mOpt}</select>`;
+            }
+            if (isConnected && obsTextSources.length > 0) {
+                let tOpt = `<option value="">-- Blank / None --</option>`;
+                obsTextSources.forEach(s => { tOpt += `<option value="${s}" ${s === t.textSource ? 'selected' : ''}>${s}</option>`; });
+                if (t.textSource && !obsTextSources.includes(t.textSource)) { tOpt += `<option value="${t.textSource}" selected>${t.textSource} (Not Found)</option>`; }
+                textSourceHTML = `<select class="t-textsource">${tOpt}</select>`;
+            }
+            
+            div.innerHTML = `
+                <div class="trigger-row-top">
+                    <div>
+                        <label>Trigger Pattern(s) <small style="color:#aaa;">(comma-separated)</small></label>
+                        <input type="text" class="t-trigger" value="${t.trigger || ''}" placeholder="Twitch * sub, YouTube * member">
+                    </div>
+                    <div>
+                        <label>Scene Name</label>
+                        ${sceneHTML}
+                    </div>
+                    <div>
+                        <label>Source Name</label>
+                        ${sourceHTML}
+                    </div>
+                    <div>
+                        <label>Duration (ms)</label>
+                        <input type="number" class="t-duration" value="${t.duration || 5000}" step="100">
+                    </div>
+                    <div style="text-align: right;">
+                        <button class="btn-red" onclick="removeTriggerRow(${i})" title="Remove">✕</button>
+                    </div>
+                </div>
+                <div class="trigger-row-bottom">
+                    <div>
+                        <label>Text Scene (Optional)</label>
+                        ${textSceneHTML}
+                    </div>
+                    <div>
+                        <label>Text Source Name (Optional)</label>
+                        ${textSourceHTML}
+                    </div>
+                    <div>
+                        <label>Text to Apply <small style="color:#aaa;">(Use {username}, {customData.viewers}, {1}, etc.)</small></label>
+                        <textarea class="t-textcontent" placeholder="Welcome {username}!
+Thanks for subbing!" rows="3" style="width: 100%; padding: 8px; background: #1a1a1a; border: 1px solid #444; color: white; border-radius: 4px; box-sizing: border-box; resize: vertical;">${t.textContent || ''}</textarea>
+                    </div>
+                </div>
+            `;
+            cont.appendChild(div);
+        });
+    }
+
+    function addTriggerRow() {
+        saveTriggersToArray();
+        config.triggers.push({ trigger: "", scene: "", source: "", duration: 5000, textScene: "", textSource: "", textContent: "" });
+        renderTriggers();
+    }
+
+    function updateSourcesDropdown(sceneSelectElement, index) {
+        const selectedScene = sceneSelectElement.value;
+        const sourceSelect = document.getElementById(`source-select-${index}`);
+        if (!sourceSelect) return;
+
+        sourceSelect.innerHTML = `<option value="">-- Select Source --</option>`;
+        if (selectedScene && obsSources[selectedScene]) {
+            obsSources[selectedScene].forEach(s => {
+                sourceSelect.innerHTML += `<option value="${s}">${s}</option>`;
+            });
+        }
+        
+        // Save current state otherwise we lose data on re-render
+        saveTriggersToArray(); 
+    }
+
+    function removeTriggerRow(index) {
+        saveTriggersToArray();
+        config.triggers.splice(index, 1);
+        renderTriggers();
+    }
+
+    function saveTriggersToArray() {
+        const rows = document.querySelectorAll('.trigger-card');
+        config.triggers = [];
+        rows.forEach(row => {
+            config.triggers.push({
+                trigger: row.querySelector('.t-trigger').value.trim(),
+                scene: row.querySelector('.t-scene').value.trim(),
+                source: row.querySelector('.t-source').value.trim(),
+                duration: parseInt(row.querySelector('.t-duration').value) || 5000,
+                textScene: row.querySelector('.t-textscene') ? row.querySelector('.t-textscene').value.trim() : "",
+                textSource: row.querySelector('.t-textsource') ? row.querySelector('.t-textsource').value.trim() : "",
+                textContent: row.querySelector('.t-textcontent') ? row.querySelector('.t-textcontent').value.trim() : ""
+            });
+        });
+    }
+
+    function saveTriggers() {
+        saveTriggersToArray();
+        saveConfig();
+        logMsg("Actions saved securely.");
+    }
+
+    function saveConfig() {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+    }
+
+</script>
+</body>
+</html>

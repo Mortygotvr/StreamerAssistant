@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Streamer Alert Relay - Chat Overlay</title>
+    <!-- 
+    [ARCHITECTURAL NOTE] 
+    This file is strictly for DISPLAY. 
+    It receives rendered messages via WebSocket.
+    It contains NO authentication or moderation evaluation logic.
+    * It DOES receive asynchronous UUID deletion events from the backend AI mod engine.
+    -->
+    <style id="dynamic-styles">
+        /* Dynamic settings will be injected here */
+    </style>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;700&display=swap');
+
+        body { 
+            font-family: 'Poppins', sans-serif; 
+            background-color: transparent; 
+            color: white; 
+            margin: 0; 
+            overflow: hidden; 
+        }
+        
+        #chat-container {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            right: 10px;
+            height: 100vh;
+            overflow-y: hidden;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
+        }
+
+        #status {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            font-size: 14px;
+            color: gray;
+            background: rgba(0,0,0,0.5);
+            padding: 4px 8px;
+            border-radius: 4px;
+            z-index: 1000;
+        }
+
+        .chat-line {
+            margin-bottom: 8px;
+            padding: 8px 12px;
+            background: rgba(20, 20, 30, 0.7);
+            border-radius: 8px;
+            animation: slideIn 0.3s ease-out;
+            font-size: 16px;
+            line-height: 1.5;
+            display: flex;
+            align-items: flex-start;
+            backdrop-filter: blur(4px);
+            width: fit-content;
+            max-width: 90%;
+        }
+
+        .meta-col {
+            display: flex;
+            align-items: center;
+            margin-right: 8px;
+            margin-top: 3px; /* visual alignment */
+            flex-shrink: 0;
+        }
+
+        .service-icon, .badge-icon {
+            width: 18px;
+            height: 18px;
+            margin-right: 4px;
+            display: inline-block;
+            vertical-align: middle;
+        }
+
+        .avatar-badge {
+            width: 20px;
+            height: 20px;
+            margin-right: 6px;
+            display: inline-block;
+            vertical-align: middle;
+            border-radius: 50%;
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+
+        .username {
+            font-weight: 700;
+            margin-right: 6px;
+            color: #f0f0f0;
+            white-space: nowrap;
+        }
+
+        .message {
+            color: #ffffff;
+            word-wrap: break-word;
+            flex: 1;
+        }
+        
+        .emote {
+            vertical-align: middle;
+            max-height: 28px;
+            margin: -4px 2px;
+        }
+
+        /* Platform specific username colors */
+        .user-twitch { color: #a970ff; }
+        .user-youtube { color: #ff5555; }
+        .user-kick { color: #53fc18; }
+        .user-whisper { color: #FF00E5; }
+
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* --- Hover Settings Menu --- */
+        #settings-menu {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(30, 30, 40, 0.95);
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #444;
+            z-index: 9999;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.3s;
+            font-family: sans-serif;
+            font-size: 13px;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            width: 220px;
+        }
+
+        body:hover #settings-menu {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .setting-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .setting-row input[type="color"],
+        .setting-row input[type="number"],
+        .setting-row input[type="range"],
+        .setting-row select {
+            background: #2a2a35;
+            color: white;
+            border: 1px solid #555;
+            border-radius: 4px;
+            padding: 4px;
+            cursor: pointer;
+        }
+        
+    </style>
+</head>
+<body>
+    <div id="settings-menu">
+        <div style="text-align: center; font-weight: bold; border-bottom: 1px solid #555; padding-bottom: 5px; margin-bottom: 5px;">Overlay Settings <span style="font-size:10px; color:#888;">(Hover Only)</span></div>
+
+        <div class="setting-row">
+            <span title="Red color of chat bubbles">Bg Red</span>
+            <input type="range" id="set_bg_r" min="0" max="255" step="1" value="20" style="width: 80px;">
+        </div>
+        <div class="setting-row">
+            <span title="Green color of chat bubbles">Bg Green</span>
+            <input type="range" id="set_bg_g" min="0" max="255" step="1" value="20" style="width: 80px;">
+        </div>
+        <div class="setting-row">
+            <span title="Blue color of chat bubbles">Bg Blue</span>
+            <input type="range" id="set_bg_b" min="0" max="255" step="1" value="30" style="width: 80px;">
+        </div>
+        <div class="setting-row">
+            <span title="Transparency of chat bubbles">Bg Opacity</span>
+            <input type="range" id="set_bgopacity" min="0" max="1" step="0.1" value="0.7" style="width: 80px;">
+        </div>
+
+        <div class="setting-row" style="margin-top: 5px; border-top: 1px solid #555; padding-top: 5px;">
+            <span>Font Family <span style="font-size:10px; color:#888;">(Click to Cycle)</span></span>
+            <input type="text" id="set_font" value="'Poppins'" readonly style="width: 80px; text-align: center; background: #2a2a35; border: 1px solid #555; color: white; cursor: pointer; user-select: none;">
+        </div>
+        
+        <div class="setting-row">
+            <span>Font Size (px)</span>
+            <input type="number" id="set_fontsize" value="16" style="width: 50px;">
+        </div>
+        
+        <div class="setting-row">
+            <span>Text Shadow</span>
+            <input type="checkbox" id="set_shadow" checked>
+        </div>
+        
+        <div class="setting-row">
+            <span>Show Emotes</span>
+            <input type="checkbox" id="set_emotes" checked>
+        </div>
+
+        <div class="setting-row">
+            <span>Show Badges</span>
+            <input type="checkbox" id="set_user_badges" checked>
+        </div>
+        
+        <div class="setting-row">
+            <span>Show Avatars</span>
+            <input type="checkbox" id="set_user_images" checked>
+        </div>
+        
+        <div class="setting-row" style="margin-top: 5px; border-top: 1px solid #555; padding-top: 10px;">
+            <span title="Immediately hides messages that trigger AI Moderation">Only Clean Msgs</span>
+            <input type="checkbox" id="set_clean">
+        </div>
+    </div>
+
+    <div id="status">Connecting...</div>
+    <div id="chat-container"></div>
+
+    <script>
+        const container = document.getElementById('chat-container');
+        const statusDiv = document.getElementById('status');
+        let ws;
+
+        // --- OVERLAY SETTINGS LOGIC ---
+        const settings = {
+            bg_r: localStorage.getItem('ov_bg_r') || '20',
+            bg_g: localStorage.getItem('ov_bg_g') || '20',
+            bg_b: localStorage.getItem('ov_bg_b') || '30',
+            bgopacity: localStorage.getItem('ov_bgopacity') || '0.7',
+            font: localStorage.getItem('ov_font') || "'Poppins'",
+            fontsize: localStorage.getItem('ov_fontsize') || '16',
+            shadow: localStorage.getItem('ov_shadow') !== 'false',
+            emotes: localStorage.getItem('ov_emotes') !== 'false',
+            user_badges: localStorage.getItem('ov_user_badges') !== 'false',
+            user_images: localStorage.getItem('ov_user_images') !== 'false',
+            clean: localStorage.getItem('ov_clean') === 'true'
+        };
+
+        function initSettings() {
+            document.getElementById('set_bg_r').value = settings.bg_r;
+            document.getElementById('set_bg_g').value = settings.bg_g;
+            document.getElementById('set_bg_b').value = settings.bg_b;
+            document.getElementById('set_bgopacity').value = settings.bgopacity;
+            document.getElementById('set_font').value = settings.font.replace(/'/g, ""); // clean visual
+            document.getElementById('set_fontsize').value = settings.fontsize;
+            document.getElementById('set_shadow').checked = settings.shadow;
+            document.getElementById('set_emotes').checked = settings.emotes;
+            document.getElementById('set_user_badges').checked = settings.user_badges;
+            document.getElementById('set_user_images').checked = settings.user_images;
+            document.getElementById('set_clean').checked = settings.clean;
+
+            // Handle Font Cycling
+            const fonts = ["'Poppins'", "Arial", "'Courier New'", "Verdana", "'Comic Sans MS'"];
+            document.getElementById('set_font').addEventListener('click', (e) => {
+                let currentIndex = fonts.indexOf(settings.font);
+                if (currentIndex === -1) currentIndex = 0;
+                let nextIndex = (currentIndex + 1) % fonts.length;
+                settings.font = fonts[nextIndex];
+                e.target.value = settings.font.replace(/'/g, "");
+                localStorage.setItem('ov_font', settings.font);
+                applySettings();
+            });
+
+            const inputs = ['set_bg_r', 'set_bg_g', 'set_bg_b', 'set_bgopacity', 'set_fontsize', 'set_shadow', 'set_emotes', 'set_user_badges', 'set_user_images', 'set_clean'];
+            inputs.forEach(id => {
+                document.getElementById(id).addEventListener('input', (e) => {
+                    const key = id.replace('set_', '');
+                    const val = (e.target.type === 'checkbox') ? e.target.checked : e.target.value;
+                    settings[key] = val;
+                    localStorage.setItem('ov_' + key, val);
+                    applySettings();
+                });
+            });
+            applySettings();
+        }
+
+        function applySettings() {
+            const css = `
+                body {
+                    font-family: ${settings.font}, sans-serif !important;
+                }
+                .chat-line {
+                    background: rgba(${settings.bg_r}, ${settings.bg_g}, ${settings.bg_b}, ${settings.bgopacity}) !important;
+                    font-size: ${settings.fontsize}px !important;
+                }
+                #chat-container {
+                    text-shadow: ${settings.shadow ? '1px 1px 2px rgba(0,0,0,0.8)' : 'none'} !important;
+                }
+                .emote {
+                    display: ${settings.emotes ? 'inline-block' : 'none'} !important;
+                }
+                .badge-icon {
+                    display: ${settings.user_badges ? 'inline-block' : 'none'} !important;
+                }
+                .avatar-badge {
+                    display: ${settings.user_images ? 'inline-block' : 'none'} !important;
+                }
+            `;
+            document.getElementById('dynamic-styles').innerText = css;
+        }
+
+        initSettings();
+
+        // --- ICONS (SVG Strings) ---
+        const ICONS = {
+            // Platforms
+            Twitch: `<svg viewBox="0 0 24 24" fill="#6441a5"><path d="M11.571 4.714h1.715v5.143H11.57zm4.715 0H18v5.143h-1.714zM6 0L1.714 4.286v15.428h5.143V24l4.286-4.286h2.999L22.286 11.57V0zm14.571 11.143l-3.428 3.428h-3.429l-3 3v-3H6.857V1.714h13.714Z"/></svg>`,
+            YouTube: `<svg viewBox="0 0 24 24" fill="#FF0000"><path d="M19.615 3.184c-3.604-.246-11.631-.245-15.23 0-3.897.266-4.356 2.62-4.385 8.816.029 6.185.484 8.549 4.385 8.816 3.6.245 11.626.246 15.23 0 3.897-.266 4.356-2.62 4.385-8.816-.029-6.185-.484-8.549-4.385-8.816zm-10.615 12.816v-8l8 3.993-8 4.007z"/></svg>`,
+            Kick: `<svg viewBox="0 0 24 24" fill="#53fc18"><path d="M3 0h18a3 3 0 0 1 3 3v18a3 3 0 0 1-3 3H3a3 3 0 0 1-3-3V3a3 3 0 0 1 3-3zm6.5 6a.5.5 0 0 0-.5.5v11a.5.5 0 0 0 .5.5h2a.5.5 0 0 0 .5-.5v-4.6l4.2 5a.5.5 0 0 0 .4.1h2.5a.5.5 0 0 0 .4-.8l-4.5-5.4 4.3-4.9a.5.5 0 0 0-.4-.8h-2.5a.5.5 0 0 0-.4.2l-3.8 4.3V6.5a.5.5 0 0 0-.5-.5h-2z"/></svg>`,
+            
+            // Badges
+            MOD: `<svg viewBox="0 0 24 24" fill="#00AD03"><path d="M21 5c-1.11-.35-2.33-.5-3.5-.5-1.95 0-4.05.4-5.5 1.5-1.45-1.1-3.55-1.5-5.5-1.5S2.45 4.9 1 6v7c0 5.55 3.84 10.74 9 12 2.3-1.34 4.2-3.46 5.57-5.74.83-1.37 1.43-2.9 1.43-4.5V5h4zM11 21.89c-3.14-1.18-5.69-4.07-6.52-7.89h8.28c-.5 3.12-2.81 7.22-1.76 7.89z"/></svg>`, // Shield
+            BROADCASTER: `<svg viewBox="0 0 24 24" fill="#e91916"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>`, // Video Camera
+            VIP: `<svg viewBox="0 0 24 24" fill="#E005B9"><path d="M12 2l-2.4 7.2h-7.6l6 4.8-2.4 7.2 6.4-4.8 6.4 4.8-2.4-7.2 6-4.8h-7.6z"/></svg>`, // Diamond/Star shape mix
+            SUB: `<svg viewBox="0 0 24 24" fill="#8205B3"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>`, // Star
+            VERIFIED: `<svg viewBox="0 0 24 24" fill="#1DA1F2"><path d="M23 12l-2.44-2.79.34-3.69-3.61-.82-1.89-3.2L12 2.96 8.6 1.5 6.71 4.69 3.1 5.5l.34 3.69L1 12l2.44 2.79-.34 3.69 3.61.82 1.89 3.2 3.4 1.46 1.89 3.19 3.61-.82 3.61.82 1.89-3.19 3.4-1.46 1.89-3.2 3.61-.82-.34-3.69L23 12zm-12.91 4.72l-3.8-3.81 1.48-1.48 2.32 2.33 5.85-5.87 1.48 1.48-7.33 7.35z"/></svg>`, // Checkmark
+            OWNER: `<svg viewBox="0 0 24 24" fill="#F4D03F"><path d="M5 16L3 5l5.5 5L12 4l3.5 6L21 5l-2 11H5zm14 3c0 .6-.4 1-1 1H6c-.6 0-1-.4-1-1v-1h14v1z"/></svg>`, // Crown
+            OG: `<svg viewBox="0 0 24 24" fill="#53fc18"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>`, // Exclamation circle (Generic for OG)
+            FOUNDER: `<svg viewBox="0 0 24 24" fill="#FFD700"><path d="M12 2L9 9H2L7 14L5 21L12 17L19 21L17 14L22 9H15L12 2Z"/></svg>`, // Golden Star (Founder)
+            // Default Fallback
+            DEFAULT_BADGE: `<svg viewBox="0 0 24 24" fill="#888"><circle cx="12" cy="12" r="10"/></svg>`
+        };
+
+        function connect() {
+            ws = new WebSocket('ws://localhost:41837');
+
+            ws.onopen = () => {
+                statusDiv.textContent = "Connected to Relay";
+                statusDiv.style.color = "lime";
+                // Hide status after 3 seconds
+                setTimeout(() => { statusDiv.style.opacity = '0'; }, 3000);
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'chat') {
+                        addChatMessage(data);
+                    } else if (data.type === 'alert') {
+                        // Optional: Add visible alert handler here later
+                        // addAlert(data); 
+                    } else if (data.type === 'moderation') {
+                        // If clean mode is enabled, remove messages immediately when flagged
+                        if (settings.clean && data.payload && data.payload.trigger && data.payload.trigger.includes("FLAGGED")) {
+                            if (data.payload.msg_id) {
+                                const msgEl = document.getElementById("msg-" + data.payload.msg_id);
+                                if (msgEl) {
+                                    // Smoothly animate removal
+                                    msgEl.style.transition = "opacity 0.3s, transform 0.3s";
+                                    msgEl.style.opacity = "0";
+                                    msgEl.style.transform = "translateX(-20px)";
+                                    setTimeout(() => msgEl.remove(), 300);
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.error('Error parsing message', e);
+                }
+            };
+
+            ws.onclose = () => {
+                statusDiv.style.opacity = '1';
+                statusDiv.textContent = "Reconnecting...";
+                statusDiv.style.color = "orange";
+                setTimeout(connect, 3000);
+            };
+
+            ws.onerror = (err) => {
+                console.error('WS Error:', err);
+                ws.close();
+            };
+        }
+
+        function getBadgesHTML(badgeString) {
+            // Parses string like "[MOD] [badge:URL:TITLE]"
+            if (!badgeString) return "";
+            
+            // Matches anything inside [...]
+            const regex = /\[(.*?)\]/g;
+            let match;
+            let html = "";
+            
+            while ((match = regex.exec(badgeString)) !== null) {
+                const content = match[1];
+                
+                // Check if it's a URL badge
+                if (content.startsWith("badge:")) {
+                    // Better split: content is "badge:URL...:TITLE"
+                    // But URL contains colons (https://).
+                    // "badge:https://example.com/image.png:MOD"
+                    const lastColon = content.lastIndexOf(":");
+                    if (lastColon > 6) {
+                        const urlPart = content.substring(6, lastColon);
+                        const titlePart = content.substring(lastColon + 1);
+
+                        // Inline the style completely so OBS cache cannot ignore it
+                        if (urlPart.includes("profile_image")) {
+                            html += `<img src="${urlPart}" title="${titlePart}" style="width: 20px; height: 20px; margin-right: 6px; display: inline-block; vertical-align: middle; border-radius: 50%; border: 1px solid rgba(255,255,255,0.2);">`;
+                        } else {
+                            html += `<img src="${urlPart}" class="badge-icon" title="${titlePart}">`;
+                        }
+                    }
+                } else {
+                    // Legacy [MOD] [SUB] handling
+                    const badgeCode = content.toUpperCase(); 
+                    let svg = ICONS[badgeCode] || ICONS.DEFAULT_BADGE;
+                    
+                    if (badgeCode === "MEMBER") svg = ICONS.SUB;
+                    if (badgeCode.includes("MOD")) svg = ICONS.MOD;
+                    
+                    html += `<div class="badge-icon" title="${badgeCode}">${svg}</div>`;
+                }
+            }
+            return html;
+        }
+
+        function addChatMessage(data) {
+            const div = document.createElement('div');
+            div.className = 'chat-line';
+            if (data.msg_id) {
+                div.id = 'msg-' + data.msg_id;
+            }
+
+            // 1. Service Icon / Avatar
+            let serviceHtml = "";
+            let serviceName = data.source || "Unknown";
+            let sourceKey = Object.keys(ICONS).find(k => serviceName.toLowerCase().includes(k.toLowerCase()));
+            
+            if (data.avatar) {
+                // If user has an avatar, replace the company badge with it, but use the company's color as a ring
+                let ringColor = "gray";
+                if (sourceKey === "Twitch") ringColor = "#9146FF";
+                else if (sourceKey === "YouTube") ringColor = "#FF0000";
+                else if (sourceKey === "Kick") ringColor = "#53fc18";
+
+                serviceHtml = `<img src="${data.avatar}" title="${data.source}" style="width: 20px; height: 20px; border-radius: 50%; border: 2px solid ${ringColor}; margin-right: 6px; vertical-align: middle; display: inline-block; flex-shrink: 0;" />`;
+            } else if (sourceKey) {
+                serviceHtml = `<div class="service-icon">${ICONS[sourceKey]}</div>`;
+            } else {
+                serviceHtml = `<span class="meta-source">[${data.source}]</span>`;
+            }
+
+            // 2. Badges
+            let badgesHtml = getBadgesHTML(data.badges);
+
+            // 3. Username Class
+            let userClass = "username";
+            if (serviceName.toLowerCase().includes("twitch")) userClass += " user-twitch";
+            else if (serviceName.toLowerCase().includes("youtube")) userClass += " user-youtube";
+            else if (serviceName.toLowerCase().includes("kick")) userClass += " user-kick";
+
+            // Whisper styling
+            if (data.type === 'whisper') {
+                 div.style.borderLeft = "4px solid #FF00E5"; // Pink border
+                 div.style.background = "rgba(40, 0, 40, 0.8)";
+                 userClass += " user-whisper";
+                 badgesHtml += `<span title="Whisper" style="color:#FF00E5; font-size: 0.8em; margin-right:4px;">[WHISPER]</span>`;
+            }
+
+            // 4. Emote Processing
+            let rawMessage = escapeHtml(data.message);
+            
+            // Kick: [emote:ID:name]
+            rawMessage = rawMessage.replace(/\[emote:(\d+):([\w]+)\]/g, 
+                '<img src="https://files.kick.com/emotes/$1/fullsize" class="emote" alt="$2">');
+            
+            // Twitch: [twitch_emote:ID]
+            rawMessage = rawMessage.replace(/\[twitch_emote:([\w]+)\]/g, 
+                '<img src="https://static-cdn.jtvnw.net/emoticons/v2/$1/default/dark/1.0" class="emote">');
+                
+            // YouTube: [yt_emoji:URL]
+            rawMessage = rawMessage.replace(/\[yt_emoji:(.*?)\]/g, 
+                '<img src="$1" class="emote">');
+
+            // 5. Build HTML
+            div.innerHTML = `
+                <div class="meta-col">
+                    ${serviceHtml}
+                    ${badgesHtml}
+                </div>
+                <div class="message">
+                    <span class="${userClass}">${data.username || data.user}:</span>
+                    ${rawMessage}
+                </div>
+            `;
+            
+            appendLine(div);
+        }
+
+        function appendLine(element) {
+            container.appendChild(element);
+            
+            // Keep only last 50 messages
+            while (container.children.length > 50) {
+                container.removeChild(container.firstChild);
+            }
+            // Auto scroll is disabled in CSS (flex-end handles sticky bottom usually)
+            // But if needed:
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function escapeHtml(text) {
+            if (!text) return "";
+            return text
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+
+        // Start connection
+        connect();
+    </script>
+</body>
+</html>

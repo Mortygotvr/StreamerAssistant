@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>StreamerAssistant - Warudo Bridge</title>
+    <style>
+        body {
+            background-color: #1e1e2e;
+            color: #cdd6f4;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 2px solid #313244;
+            padding-bottom: 10px;
+        }
+        .status-container {
+            display: flex;
+            gap: 20px;
+        }
+        .status-badge {
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-weight: bold;
+            background-color: #f38ba8; /* disconnected red */
+            color: #11111b;
+        }
+        .status-badge.connected {
+            background-color: #a6e3a1; /* connected green */
+        }
+        .log-container {
+            flex-grow: 1;
+            background-color: #11111b;
+            border-radius: 8px;
+            padding: 15px;
+            height: 400px;
+            overflow-y: auto;
+            font-family: monospace;
+            border: 1px solid #313244;
+        }
+        .log-entry {
+            margin-bottom: 5px;
+            border-bottom: 1px dashed #313244;
+            padding-bottom: 5px;
+        }
+        .log-time { color: #89b4fa; }
+        .log-source { color: #f9e2af; font-weight: bold; }
+        .log-action { color: #a6e3a1; }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h2>Warudo Integration Bridge</h2>
+        <div class="status-container">
+            <div id="sa-status" class="status-badge">SA WebSocket: Disconnected</div>
+            <div id="warudo-status" class="status-badge">Warudo WebSocket: Disconnected</div>
+        </div>
+    </div>
+
+    <div>
+        <p>This bridge listens to <strong>StreamerAssistant (Port 41837)</strong> and forwards triggers to <strong>Warudo WebSocket (Port 19190)</strong>.</p>
+    </div>
+
+    <div class="log-container" id="log-container">
+        <!-- Logs will appear here -->
+    </div>
+
+    <script>
+        const logContainer = document.getElementById('log-container');
+        const saStatus = document.getElementById('sa-status');
+        const warudoStatus = document.getElementById('warudo-status');
+
+        let saWs = null;
+        let warudoWs = null;
+
+        // Warudo setup
+        const WARUDO_PORT = 19190; // Default Warudo WebSocket port
+        
+        function log(source, action, details) {
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            const time = new Date().toLocaleTimeString();
+            entry.innerHTML = `<span class="log-time">[${time}]</span> <span class="log-source">${source}</span>: <span class="log-action">${action}</span> <span style="color:#a6adc8">${details ? JSON.stringify(details) : ''}</span>`;
+            logContainer.appendChild(entry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+
+        // Connect to StreamerAssistant
+        function connectSA() {
+            saWs = new WebSocket("ws://127.0.0.1:41837");
+            
+            saWs.onopen = () => {
+                saStatus.textContent = "SA WebSocket: Connected";
+                saStatus.classList.add("connected");
+                log("StreamerAssistant", "Connected");
+            };
+
+            saWs.onclose = () => {
+                saStatus.textContent = "SA WebSocket: Disconnected";
+                saStatus.classList.remove("connected");
+                log("StreamerAssistant", "Disconnected, reconnecting in 3s...");
+                setTimeout(connectSA, 3000);
+            };
+
+            saWs.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    
+                    if (data.type === "moderation" || data.type === "test_sammi_trigger") {
+                        const payload = data.payload || data;
+                        log("StreamerAssistant", `Received "${payload.trigger}"`, payload);
+                        
+                        forwardToWarudo(payload);
+                    }
+                } catch (e) {
+                    console.error("Failed to parse SA message", e);
+                }
+            };
+        }
+
+        // Connect to Warudo
+        function connectWarudo() {
+            warudoWs = new WebSocket(`ws://127.0.0.1:${WARUDO_PORT}`);
+            
+            warudoWs.onopen = () => {
+                warudoStatus.textContent = "Warudo WebSocket: Connected";
+                warudoStatus.classList.add("connected");
+                log("Warudo", "Connected to Warudo");
+            };
+
+            warudoWs.onclose = () => {
+                warudoStatus.textContent = "Warudo WebSocket: Disconnected";
+                warudoStatus.classList.remove("connected");
+                log("Warudo", "Disconnected, reconnecting in 5s...");
+                setTimeout(connectWarudo, 5000);
+            };
+
+            warudoWs.onerror = (err) => {
+                console.error("Warudo WS Error", err);
+            };
+        }
+
+        function forwardToWarudo(payload) {
+            if (!warudoWs || warudoWs.readyState !== WebSocket.OPEN) {
+                log("Warudo", "Cannot send: Not connected");
+                return;
+            }
+
+            // --- WARUDO PAYLOAD FORMATTING ---
+            // Edit this exact structure to match your Warudo Blueprints / WebSockets mapping
+            
+            const warudoMessage = {
+                action: "StreamerAssistantEvent", // The event name your blueprint receives
+                data: {
+                    trigger: payload.trigger,
+                    username: payload.username || payload.user,
+                    message: payload.message || "",
+                    platform: payload.platform || "Unknown",
+                    amount: payload.customData?.amount || payload.var || 0
+                }
+            };
+
+            warudoWs.send(JSON.stringify(warudoMessage));
+            log("Warudo", "Forwarded event", warudoMessage);
+        }
+
+        // Initialize connections
+        connectSA();
+        connectWarudo();
+    </script>
+</body>
+</html>

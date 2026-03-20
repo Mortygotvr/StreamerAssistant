@@ -1,0 +1,54 @@
+{
+    "sammi": {
+        "sammi_url": "http://localhost:9450/webhook",
+        "sammi_password": ""
+    },
+    "chats": {
+        "example_chat": {
+            "parser": "twitch_parse",
+            "input": "channelname",
+            "moderate": false,
+            "tts_enabled": true,
+            "sub_cache_enabled": false,
+            "event_filters": {
+                "Twitch chat": true,
+                "Twitch cheer": true,
+                "Twitch redeem (irc)": true,
+                "Twitch redeem (pubsub)": true,
+                "Twitch sub": true,
+                "Twitch raid": true,
+                "Twitch ban": true,
+                "Twitch timeout": true,
+                "Twitch message delete": true,
+                "Twitch notice": true,
+                "Twitch roomstate": true,
+                "Twitch other": true
+            },
+            "filters": {
+                "Twitch chat": true,
+                "Twitch cheer": true,
+                "Twitch redeem (irc)": true,
+                "Twitch redeem (pubsub)": true,
+                "Twitch sub": true,
+                "Twitch raid": true,
+                "Twitch ban": true,
+                "Twitch timeout": true,
+                "Twitch message delete": true,
+                "Twitch notice": true,
+                "Twitch roomstate": true,
+                "Twitch other": true
+            }
+        }
+    },
+    "voice_overrides": {
+        "exampleuser": "en_US-lessac-low"
+    },
+    "user_nicknames": {
+        "exampleuser": "John"
+    },
+    "sammi_auth": {
+        "url": "ws://localhost:9460",
+        "password": ""
+    },
+    "banned_users": []
+}
